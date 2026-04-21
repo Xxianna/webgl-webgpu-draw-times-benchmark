@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demo 2: 原生WebGL 彩色三角面片（每个三角形独立drawCall）</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 100;
+        }
+        #controls label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        #controls input {
+            width: 150px;
+            padding: 5px;
+            margin-bottom: 10px;
+        }
+        #controls button {
+            padding: 5px 15px;
+            cursor: pointer;
+        }
+        #fps-display {
+            margin-top: 10px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <canvas id="gl-canvas"></canvas>
+    </div>
+    <div id="controls">
+        <label for="triangle-count">三角面片数量:</label>
+        <input type="number" id="triangle-count" value="100" min="1" max="10000000000000000000000000">
+        <button id="apply-btn">应用</button>
+        <div id="fps-display">FPS: 0</div>
+    </div>
+
+    <script>
+        // ==================== 数学工具类 ====================
+        class Mat4 {
+            static perspective(fov, aspect, near, far) {
+                const m = new Float32Array(16);
+                const f = 1.0 / Math.tan(fov / 2);
+                const nf = 1 / (near - far);
+                
+                m[0] = f / aspect;
+                m[5] = f;
+                m[10] = (far + near) * nf;
+                m[11] = -1;
+                m[14] = 2 * far * near * nf;
+                
+                return m;
+            }
+
+            static lookAt(eye, center, up) {
+                const m = new Float32Array(16);
+                
+                const zx = eye[0] - center[0];
+                const zy = eye[1] - center[1];
+                const zz = eye[2] - center[2];
+                
+                let len = 1 / Math.sqrt(zx * zx + zy * zy + zz * zz);
+                const zAxis = [zx * len, zy * len, zz * len];
+                
+                const xx = up[1] * zAxis[2] - up[2] * zAxis[1];
+                const xy = up[2] * zAxis[0] - up[0] * zAxis[2];
+                const xz = up[0] * zAxis[1] - up[1] * zAxis[0];
+                
+                len = 1 / Math.sqrt(xx * xx + xy * xy + xz * xz);
+                const xAxis = [xx * len, xy * len, xz * len];
+                
+                const yx = zAxis[1] * xAxis[2] - zAxis[2] * xAxis[1];
+                const yy = zAxis[2] * xAxis[0] - zAxis[0] * xAxis[2];
+                const yz = zAxis[0] * xAxis[1] - zAxis[1] * xAxis[0];
+                
+                m[0] = xAxis[0]; m[1] = xAxis[1]; m[2] = xAxis[2]; m[3] = 0;
+                m[4] = yx; m[5] = yy; m[6] = yz; m[7] = 0;
+                m[8] = zAxis[0]; m[9] = zAxis[1]; m[10] = zAxis[2]; m[11] = 0;
+                m[12] = -(xAxis[0] * eye[0] + xAxis[1] * eye[1] + xAxis[2] * eye[2]);
+                m[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+                m[14] = -(zAxis[0] * eye[0] + zAxis[1] * eye[1] + zAxis[2] * eye[2]);
+                m[15] = 1;
+                
+                return m;
+            }
+        }
+
+        // ==================== WebGL初始化 ====================
+        const canvas = document.getElementById('gl-canvas');
+        const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
+
+        if (!gl) {
+            alert('您的浏览器不支持WebGL');
+            throw new Error('WebGL not supported');
+        }
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // ==================== Shader编译 ====================
+        const vertexShaderSource = `
+            attribute vec3 aPosition;
+            attribute vec3 aColor;
+            
+            uniform mat4 uProjection;
+            uniform mat4 uView;
+            
+            varying vec3 vColor;
+            
+            void main() {
+                gl_Position = uProjection * uView * vec4(aPosition, 1.0);
+                vColor = aColor;
+            }
+        `;
+
+        const fragmentShaderSource = `
+            precision mediump float;
+            
+            varying vec3 vColor;
+            
+            void main() {
+                gl_FragColor = vec4(vColor, 1.0);
+            }
+        `;
+
+        function compileShader(source, type) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                const error = gl.getShaderInfoLog(shader);
+                gl.deleteShader(shader);
+                throw new Error('Shader编译错误: ' + error);
+            }
+            
+            return shader;
+        }
+
+        const vertexShader = compileShader(vertexShaderSource, gl.VERTEX_SHADER);
+        const fragmentShader = compileShader(fragmentShaderSource, gl.FRAGMENT_SHADER);
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error('程序链接错误: ' + gl.getProgramInfoLog(program));
+        }
+
+        gl.useProgram(program);
+
+        // 获取attribute和uniform位置
+        const aPosition = gl.getAttribLocation(program, 'aPosition');
+        const aColor = gl.getAttribLocation(program, 'aColor');
+        const uProjection = gl.getUniformLocation(program, 'uProjection');
+        const uView = gl.getUniformLocation(program, 'uView');
+
+        // ==================== 禁用剔除，启用双面渲染 ====================
+        // 不调用 gl.enable(gl.CULL_FACE)，默认双面渲染
+
+        // ==================== 存储每个三角形的独立缓冲区 ====================
+        // 每个三角形有3个顶点，每个顶点3个坐标 + 3个颜色
+        const TRIANGLE_VERTEX_COUNT = 3;
+        const FLOATS_PER_VERTEX = 3;
+        const FLOATS_PER_TRIANGLE = TRIANGLE_VERTEX_COUNT * FLOATS_PER_VERTEX * 2; // position + color
+
+        let triangleBuffers = []; // 存储每个三角形的 {positionBuffer, colorBuffer}
+        let triangleCount = 100;
+
+        // 创建单个三角形的缓冲区并填充数据
+        function createTriangleBuffer(index) {
+            const centerX = (Math.random() - 0.5) * 10;
+            const centerY = (Math.random() - 0.5) * 10;
+            const centerZ = (Math.random() - 0.5) * 10;
+            const size = 0.1 + Math.random() * 0.3;
+
+            // 位置数据：3个顶点
+            const positions = new Float32Array([
+                centerX + (Math.random() - 0.5) * size, centerY + (Math.random() - 0.5) * size, centerZ + (Math.random() - 0.5) * size,
+                centerX + (Math.random() - 0.5) * size, centerY + (Math.random() - 0.5) * size, centerZ + (Math.random() - 0.5) * size,
+                centerX + (Math.random() - 0.5) * size, centerY + (Math.random() - 0.5) * size, centerZ + (Math.random() - 0.5) * size
+            ]);
+
+            // 颜色数据：3个顶点
+            const colors = new Float32Array([
+                Math.random(), Math.random(), Math.random(),
+                Math.random(), Math.random(), Math.random(),
+                Math.random(), Math.random(), Math.random()
+            ]);
+
+            // 为每个三角形创建独立的缓冲区
+            const positionBuffer = gl.createBuffer();
+            const colorBuffer = gl.createBuffer();
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+
+            return { positionBuffer, colorBuffer };
+        }
+
+        // 创建所有三角形的缓冲区
+        function createTriangles(count) {
+            // 释放旧的缓冲区
+            for (const buf of triangleBuffers) {
+                gl.deleteBuffer(buf.positionBuffer);
+                gl.deleteBuffer(buf.colorBuffer);
+            }
+            triangleBuffers = [];
+
+            // 创建新的三角形缓冲区，每个三角形独立
+            for (let i = 0; i < count; i++) {
+                triangleBuffers.push(createTriangleBuffer(i));
+            }
+        }
+
+        // 初始创建
+        createTriangles(triangleCount);
+
+        // ==================== 相机控制 ====================
+        let cameraDistance = 5;
+        let cameraRotation = { x: 0, y: 0 };
+        let isDragging = false;
+        let previousMousePosition = { x: 0, y: 0 };
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            previousMousePosition = { x: e.offsetX, y: e.offsetY };
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                const deltaMove = {
+                    x: e.offsetX - previousMousePosition.x,
+                    y: e.offsetY - previousMousePosition.y
+                };
+
+                cameraRotation.y += deltaMove.x * 0.01;
+                cameraRotation.x += deltaMove.y * 0.01;
+
+                previousMousePosition = { x: e.offsetX, y: e.offsetY };
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+            cameraDistance += e.deltaY * 0.01;
+            cameraDistance = Math.max(1, Math.min(20, cameraDistance));
+            e.preventDefault();
+        }, { passive: false });
+
+        // ==================== FPS计算 ====================
+        let frameCount = 0;
+        let lastTime = performance.now();
+        const fpsDisplay = document.getElementById('fps-display');
+
+        function updateFPS() {
+            const now = performance.now();
+            frameCount++;
+            if (now - lastTime >= 1000) {
+                const fps = Math.round(frameCount * 1000 / (now - lastTime));
+                fpsDisplay.textContent = `FPS: ${fps}`;
+                frameCount = 0;
+                lastTime = now;
+            }
+        }
+
+        // ==================== 渲染 - 每个三角形独立drawCall ====================
+        function render() {
+            // 设置清屏颜色
+            gl.clearColor(0, 0, 0, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            // 启用深度测试
+            gl.enable(gl.DEPTH_TEST);
+
+            // 计算投影矩阵
+            const aspect = canvas.width / canvas.height;
+            const projection = Mat4.perspective(Math.PI / 4, aspect, 0.1, 1000);
+
+            // 计算视图矩阵
+            const eye = [
+                cameraDistance * Math.sin(cameraRotation.y) * Math.cos(cameraRotation.x),
+                cameraDistance * Math.sin(cameraRotation.x),
+                cameraDistance * Math.cos(cameraRotation.y) * Math.cos(cameraRotation.x)
+            ];
+            const view = Mat4.lookAt(eye, [0, 0, 0], [0, 1, 0]);
+
+            // 设置uniform（对所有三角形相同）
+            gl.uniformMatrix4fv(uProjection, false, projection);
+            gl.uniformMatrix4fv(uView, false, view);
+
+            // 每个三角形独立绘制（独立drawCall）
+            for (let i = 0; i < triangleBuffers.length; i++) {
+                const buf = triangleBuffers[i];
+
+                // 绑定位置属性
+                gl.bindBuffer(gl.ARRAY_BUFFER, buf.positionBuffer);
+                gl.enableVertexAttribArray(aPosition);
+                gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+
+                // 绑定颜色属性
+                gl.bindBuffer(gl.ARRAY_BUFFER, buf.colorBuffer);
+                gl.enableVertexAttribArray(aColor);
+                gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
+
+                // 独立绘制这个三角形 - 每个三角形调用一次drawArrays
+                // 不使用索引，不使用实例化，不合并drawCall
+                gl.drawArrays(gl.TRIANGLES, 0, TRIANGLE_VERTEX_COUNT);
+
+                // 禁用属性数组
+                gl.disableVertexAttribArray(aPosition);
+                gl.disableVertexAttribArray(aColor);
+            }
+            console.log("triangleBuffers.length",triangleBuffers.length)
+        }
+
+        // ==================== 动画循环 ====================
+        function animate() {
+            requestAnimationFrame(animate);
+            render();
+            updateFPS();
+        }
+
+        animate();
+
+        // ==================== 控制 ====================
+        document.getElementById('apply-btn').addEventListener('click', () => {
+            const input = document.getElementById('triangle-count');
+            const value = parseInt(input.value);
+            if (!isNaN(value) && value > 0) {
+                triangleCount = value;
+                createTriangles(triangleCount);
+            }
+        });
+    </script>
+</body>
+</html>

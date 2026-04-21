@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demo 5: WASM → WebGPU 彩色三角面片</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 100;
+        }
+        #controls label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        #controls input {
+            width: 150px;
+            padding: 5px;
+            margin-bottom: 10px;
+        }
+        #controls button {
+            padding: 5px 15px;
+            cursor: pointer;
+        }
+        #fps-display {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #0f0;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <canvas id="canvas"></canvas>
+    </div>
+    <div id="controls">
+        <label for="triangle-count">三角面片数量:</label>
+        <input type="number" id="triangle-count" value="100" min="1" max="10000000000000000000000000">
+        <button id="apply-btn">应用</button>
+        <div id="fps-display">FPS: 0</div>
+    </div>
+
+    <script>
+        // WASM 模块加载完成后的回调
+        var Module = {
+            onRuntimeInitialized: function() {
+                document.getElementById('apply-btn').addEventListener('click', function() {
+                    var input = document.getElementById('triangle-count');
+                    var value = parseInt(input.value);
+                    if (!isNaN(value) && value > 0) {
+                        Module._setTriangleCount(value);
+                        document.getElementById('triangle-count').value = value;
+                    }
+                });
+
+                // 设置初始三角面片数量
+                Module._setTriangleCount(100);
+
+                console.log('[WASM] 模块加载完成');
+            }
+        };
+    </script>
+    <script src="demo5_wasm_webgpu.js"></script>
+</body>
+</html>
